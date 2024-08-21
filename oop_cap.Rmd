@@ -1,0 +1,159 @@
+---
+title: "OOP Cap"
+output: html_document
+date: "2024-08-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load necessary libraries
+```{r}
+library(dplyr)
+library(haven)
+library(survey)
+```
+
+# Load the dataset
+```{r}
+MEPS21 <- read_sas("R:/Smith Center/Data Folders/MEPS/SAS Data/raw data/h233.sas7bdat")
+```
+
+# Clean data
+```{r}
+# Rename columns
+MEPS21 <- MEPS21 %>%
+  rename(
+    AGEX = AGE21X, MCARE = MCARE21, MCRPD = MCRPD21, MCRPDX = MCRPD21X, TRIEV = TRIEV21,
+    RXSLF = RXSLF21, REGION = REGION21, RXTRI = RXTRI21, RXVA = RXVA21, POVCAT = POVCAT21,
+    FAMINC = FAMINC21, MCRPHO = MCRPHO21, MCAID = MCAID21, PRVEV = PRVEV21, RXTOT = RXTOT21,
+    PERWTF = PERWT21F, POVLEV = POVLEV21, DIABDX = DIABDX_M18
+  )
+
+# Select relevant variables
+MEPS21 <- MEPS21 %>%
+  select(
+    DUPERSID, DUID, MCARE, MCRPD, MCRPDX, HIBPDX, CHOLDX, CHDDX, ANGIDX, MIDX, STRKDX, OHRTDX,
+    TRIEV, RXSLF, AGEX, SEX, REGION, RACETHX, RXTRI, RXVA, POVCAT, HIDEG, FAMINC, MCRPHO, MCAID,
+    PRVEV, RXTOT, PERWTF, VARSTR, VARPSU, MCRPD31, MCRPD42, MCRPD31X, MCRPD42X, MCRPHO31, MCRPHO42,
+    DIABDX, POVLEV
+  )
+
+# Recode negative values as missing
+negative_vals <- c(-1, -7, -8, -9, -15)
+MEPS21 <- MEPS21 %>%
+  mutate(across(c(HIBPDX, CHOLDX, CHDDX, ANGIDX, MIDX, STRKDX, OHRTDX, DIABDX),
+                ~ replace(., . %in% negative_vals | . < 0, NA)))
+
+# Create grouping variables
+IE <- MEPS21 %>%
+  mutate(
+    Inc1 = ifelse(AGEX >= 65, 1, 0),
+    Inc2 = ifelse(MCRPD == 1 | MCRPDX == 1 | MCRPHO == 1 | MCRPD31 == 1 | MCRPD42 == 1 |
+                    MCRPD31X == 1 | MCRPD42X == 1 | MCRPHO31 == 1 | MCRPHO42 == 1, 1, 0),
+    Inc4 = case_when(
+      POVLEV > 135 & POVLEV < 150 ~ 1,
+      POVLEV >= 150 ~ 2,
+      TRUE ~ 3
+    ),
+    WT = PERWTF,
+    College = case_when(
+      HIDEG %in% c(1, 2, 3) ~ 0,
+      HIDEG %in% c(4, 5, 6, 7) ~ 1,
+      TRUE ~ NA_real_
+    ),
+    Income = case_when(
+      POVCAT %in% c(1, 2, 3) ~ 0,
+      POVCAT == 4 ~ 1,
+      POVCAT == 5 ~ 2,
+      TRUE ~ NA_real_
+    ),
+    FPL = ifelse(POVLEV <= 150, 0, 1),
+    Agegrp = case_when(
+      AGEX >= 65 & AGEX < 75 ~ 0,
+      AGEX >= 75 ~ 1,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Define the group variable for OOP spending
+IE <- IE %>%
+  mutate(
+    Group = case_when(
+      Inc1 == 1 & Inc2 == 1 & RXSLF > 2000 ~ 1,
+      Inc1 == 1 & Inc2 == 1 & RXSLF <= 2000 & !is.na(RXSLF) ~ 2,
+      TRUE ~ NA_real_
+    ),
+    TM = ifelse(MCRPD == 1 | MCRPDX == 1 | MCRPD31 == 1 | MCRPD31X == 1 | MCRPD42 == 1 | MCRPD42X == 1, 1, 0),
+    MA = ifelse(MCRPHO == 1 | MCRPHO31 == 1 | MCRPHO42 == 1, 1, 0)
+  )
+
+# Survey design object
+design <- svydesign(id = ~VARPSU, strata = ~VARSTR, weights = ~WT, data = IE, nest = TRUE)
+```
+
+# Baseline table
+```{r}
+# Rao-Scott Chi-square tables
+table_function <- function(ind, var) {
+  table <- svytable(~ Group + get(var), design = ind)
+  chi_sq <- svychisq(~ Group + get(var), design = ind)
+  
+  # Compute row percentages with confidence intervals
+  row_perc <- svyby(~ get(var), ~ Group, ind, svymean, na.rm = TRUE, level = 0.95)
+  
+  list(table = table, chi_sq = chi_sq, row_perc = row_perc)
+}
+
+# Example usage of table_function
+result_SEX <- table_function(design, "SEX")
+result_RACETHX <- table_function(design, "RACETHX")
+# Add more variables as needed
+
+# Calculating number of subjects for each group
+group_counts <- svytable(~ Group, design)
+print(group_counts)
+
+# Mean and SE for AGEX
+age_stats <- svymean(~ AGEX, design, na.rm = TRUE)
+print(age_stats)
+
+# Survey regression for AGEX across groups
+reg_model <- svyglm(AGEX ~ Group, design = design)
+summary(reg_model)
+```
+
+# OOP costs
+```{r}
+# Contrast test (1 vs 2)
+contrast_test <- regTermTest(reg_model, "Group")
+print(contrast_test)
+
+# Mean and SE for RXSLF (OOP costs)
+oop_stats <- svymean(~ RXSLF, design, na.rm = TRUE)
+print(oop_stats)
+
+# Survey regression for RXSLF across groups
+oop_reg_model <- svyglm(RXSLF ~ Group, design = design)
+summary(oop_reg_model)
+```
+
+# Savings
+```{r}
+# Savings calculation
+IE <- IE %>%
+  mutate(RXDiff = ifelse(Group == 1, RXSLF - 2000, NA_real_))
+
+# Mean savings among Group 1
+savings_stats <- svymean(~ RXDiff, design = subset(design, Group == 1))
+print(savings_stats)
+```
+
+# Histogram of savings
+```{r}
+hist_data <- svyhist(~ RXDiff, design = subset(design, Group == 1), main = "Histogram of Savings", xlab = "Total Savings ($)")
+
+# Plotting the histogram
+hist(hist_data, main = "Total Savings Histogram", xlab = "Total Savings ($)", ylab = "Weighted Population Estimates")
+```
